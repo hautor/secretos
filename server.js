@@ -10,17 +10,32 @@ const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const { nanoid } = require('nanoid');
 const { Pool } = require('pg');
+const url = require('url');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ====== DB ======
-if (!process.env.DATABASE_URL) {
-  console.warn('⚠️ Falta DATABASE_URL. Configúrala en Render → Environment.');
+/* =======================
+   DB: conexión a Postgres
+   ======================= */
+const DATABASE_URL = process.env.DATABASE_URL;
+
+if (!DATABASE_URL) {
+  console.error('❌ DATABASE_URL no está definida. Ve a Render → Environment y añádela con la cadena de Neon (termina en ?sslmode=require).');
+  process.exit(1);
 }
+
+// Log de depuración (solo host, sin credenciales)
+try {
+  const parsed = new url.URL(DATABASE_URL);
+  console.log(`🔌 Conectando a Postgres en host: ${parsed.hostname}`);
+} catch {
+  console.warn('⚠️ DATABASE_URL no parece una URL válida. Asegúrate de pegar la conexión tal cual de Neon.');
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Neon/Supabase suelen requerir SSL
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // Neon/Supabase requieren SSL
 });
 
 // Crear esquema si no existe
@@ -40,13 +55,18 @@ async function ensureSchema() {
     CREATE INDEX IF NOT EXISTS idx_secrets_created_at   ON secrets (created_at);
     CREATE INDEX IF NOT EXISTS idx_secrets_session_id   ON secrets (session_id);
   `);
+  console.log('✅ Esquema verificado/creado en Postgres.');
 }
-ensureSchema().catch(e => {
-  console.error('Error ensureSchema:', e);
+
+// Arranque: comprobamos esquema antes de aceptar tráfico
+ensureSchema().catch((e) => {
+  console.error('❌ Error ensureSchema:', e);
   process.exit(1);
 });
 
-// ====== Middlewares ======
+/* ===============
+   Middlewares
+   =============== */
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
@@ -66,7 +86,9 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
 
-// ====== Utilidades ======
+/* ===============
+   Utilidades
+   =============== */
 function violatesPolicy(text = '') {
   const banned = [/abuso\s*infantil/i, /violaci[oó]n/i, /incesto/i, /terrorismo/i];
   return banned.some((re) => re.test(text));
@@ -119,7 +141,9 @@ function formatSecret(row, req) {
   return { type: 'text', text: row.text_content };
 }
 
-// ====== Rutas ======
+/* ===============
+   Rutas
+   =============== */
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // Texto

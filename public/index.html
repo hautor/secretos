@@ -46,7 +46,17 @@
     <section class="mt-6 bg-white rounded-2xl shadow p-5">
       <h2 class="text-xl font-semibold mb-2">Secreto recibido</h2>
       <div id="result" class="text-slate-800"></div>
-      <audio id="player" controls class="w-full mt-3 hidden"></audio>
+
+      <!-- Contenedor del icono + reproductor -->
+      <div id="audioWrapper" class="flex items-center gap-2 mt-3 hidden">
+        <!-- Icono altavoz clicable -->
+        <svg id="audioIcon" xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-emerald-600 cursor-pointer hover:text-emerald-800 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 010 7.07M19.07 4.93a10 10 0 010 14.14" />
+        </svg>
+        <audio id="player" controls class="w-full"></audio>
+      </div>
+
       <div class="mt-3">
         <button id="tryFetch" class="px-3 py-2 rounded-xl bg-slate-200">Intentar conseguir uno ahora</button>
       </div>
@@ -74,6 +84,8 @@
     const result = document.getElementById('result');
     const player = document.getElementById('player');
     const tryFetch = document.getElementById('tryFetch');
+    const audioWrapper = document.getElementById('audioWrapper');
+    const audioIcon = document.getElementById('audioIcon');
 
     let mediaRecorder, chunks = [], blob;
 
@@ -109,18 +121,28 @@
     function displaySecret(payload) {
       if (!payload) return;
       result.innerHTML = '';
-      player.classList.add('hidden');
+      audioWrapper.classList.add('hidden');
+      player.pause();
+      player.removeAttribute('src');
 
       if (payload.type === 'audio') {
         player.src = payload.url;
-        player.classList.remove('hidden');
-        player.play().catch(()=>{});
+        audioWrapper.classList.remove('hidden');
       } else if (payload.type === 'text') {
         const p = document.createElement('p');
         p.textContent = payload.text;
         result.appendChild(p);
       }
     }
+
+    // Click en icono de altavoz → reproducir/pausar
+    audioIcon.addEventListener('click', () => {
+      if (player.paused) {
+        player.play().catch(()=>{});
+      } else {
+        player.pause();
+      }
+    });
 
     // Enviar texto
     sendText.onclick = async () => {
@@ -218,3 +240,4 @@
   </script>
 </body>
 </html>
+

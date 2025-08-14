@@ -1,58 +1,58 @@
-// server.js — Intercambio 1×1 por envío, sin bloquear por misma IP/sesión.
-// Regla: tras insertar, intenta devolver otro secreto distinto.
-// 1) Prioriza de OTRA sesión (más “justo”).
-// 2) Si no hay, permite de la MISMA sesión (pero nunca el recién insertado).
+// server.js — Persistencia sin disco (Render Free) con PostgreSQL (Neon/Supabase/Railway)
+// - Guarda textos y AUDIOS (voz real) dentro de Postgres (BYTEA)
+// - Intercambio 1x1 por envío (prioriza otra sesión; fallback cualquiera distinto)
+// - Endpoints: /api/secrets/text, /api/secrets/audio, /api/secrets/one
+//              /api/audio/:id, /api/stats, /api/health
 
 const express = require('express');
 const multer = require('multer');
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs');
 const cookieParser = require('cookie-parser');
-const { nanoid } = require('nanoid');
 const cors = require('cors');
+const { nanoid } = require('nanoid');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- Ruta de datos configurable ----------
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-fs.mkdirSync(path.join(DATA_DIR, 'uploads'), { recursive: true });
-
-// --- Archivos / uploads ---
-const uploadsDir = path.join(DATA_DIR, 'uploads');
-const storage = multer.diskStorage({
-  destination: uploadsDir,
-  filename: (req, file, cb) => cb(null, `${Date.now()}-${nanoid(8)}.webm`),
-});
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
-
-// --- Base de datos SQLite ---
-const dbPath = path.join(DATA_DIR, 'secrets.db');
-const db = new sqlite3.Database(dbPath);
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS secrets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL,               -- 'text' | 'audio'
-    text TEXT,
-    audio_path TEXT,
-    created_at INTEGER NOT NULL,
-    session_id TEXT NOT NULL,
-    claimed INTEGER DEFAULT 0,
-    claimed_by TEXT
-  )`);
+// ====== DB ======
+if (!process.env.DATABASE_URL) {
+  console.warn('⚠️ Falta DATABASE_URL. Configúrala en Render → Environment.');
+}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false } // Neon/Supabase suelen requerir SSL
 });
 
-// ---------- Middlewares ----------
+// Crear esquema si no existe
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS secrets (
+      id           BIGSERIAL PRIMARY KEY,
+      type         TEXT NOT NULL,        -- 'text' | 'audio'
+      text_content TEXT,
+      audio_data   BYTEA,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      session_id   TEXT NOT NULL,
+      claimed      BOOLEAN NOT NULL DEFAULT FALSE,
+      claimed_by   TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_secrets_claimed      ON secrets (claimed);
+    CREATE INDEX IF NOT EXISTS idx_secrets_created_at   ON secrets (created_at);
+    CREATE INDEX IF NOT EXISTS idx_secrets_session_id   ON secrets (session_id);
+  `);
+}
+ensureSchema().catch(e => {
+  console.error('Error ensureSchema:', e);
+  process.exit(1);
+});
+
+// ====== Middlewares ======
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
+app.use(express.static('public')); // sirve tu index.html
 
-// Estáticos
-app.use('/uploads', express.static(uploadsDir));
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Sesión anónima simple por cookie (no bloquea el intercambio)
+// Sesión anónima simple
 app.use((req, res, next) => {
   if (!req.cookies.sid) {
     res.cookie('sid', nanoid(16), { httpOnly: false, sameSite: 'lax' });
@@ -60,69 +60,69 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- Utilidades ----------
+// Multer en memoria (NADA de disco)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+// ====== Utilidades ======
 function violatesPolicy(text = '') {
-  const banned = [/porn\w*/i, /violaci[oó]n/i, /abuso\s*infantil/i, /terrorismo/i, /incesto/i];
+  const banned = [/abuso\s*infantil/i, /violaci[oó]n/i, /incesto/i, /terrorismo/i];
   return banned.some((re) => re.test(text));
 }
 
-// Intenta obtener un secreto no reclamado distinto al recien insertado.
-// Paso 1: otra sesión, FIFO. Paso 2: misma sesión (evitando el recién insertado), FIFO.
-function getExchangeSecret(excludeSessionId, excludeId) {
-  return new Promise((resolve, reject) => {
-    // 1) Otra sesión
-    db.get(
-      `SELECT * FROM secrets
-       WHERE claimed = 0
-         AND id != ?
-         AND session_id != ?
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [excludeId, excludeSessionId],
-      (err, row) => {
-        if (err) return reject(err);
-        if (row) {
-          return db.run(
-            `UPDATE secrets SET claimed = 1, claimed_by = ? WHERE id = ?`,
-            [excludeSessionId, row.id],
-            (err2) => (err2 ? reject(err2) : resolve(row))
-          );
-        }
-        // 2) Misma sesión (evita devolver el mismo recién insertado)
-        db.get(
-          `SELECT * FROM secrets
-           WHERE claimed = 0
-             AND id != ?
-           ORDER BY created_at ASC
-           LIMIT 1`,
-          [excludeId],
-          (err3, row2) => {
-            if (err3) return reject(err3);
-            if (!row2) return resolve(null);
-            db.run(
-              `UPDATE secrets SET claimed = 1, claimed_by = ? WHERE id = ?`,
-              [excludeSessionId, row2.id],
-              (err4) => (err4 ? reject(err4) : resolve(row2))
-            );
-          }
-        );
-      }
-    );
-  });
+// Selecciona un secreto distinto al recien insertado.
+// 1) Otra sesión FIFO; 2) cualquiera distinto FIFO.
+async function getExchangeSecret(excludeSessionId, excludeId) {
+  const q1 = `
+    WITH pick AS (
+      SELECT id FROM secrets
+      WHERE claimed = FALSE
+        AND id <> $1
+        AND session_id <> $2
+      ORDER BY created_at ASC
+      LIMIT 1
+    )
+    UPDATE secrets s
+      SET claimed = TRUE, claimed_by = $2
+      FROM pick
+      WHERE s.id = pick.id
+    RETURNING s.*;
+  `;
+  const r1 = await pool.query(q1, [excludeId, excludeSessionId]);
+  if (r1.rows.length) return r1.rows[0];
+
+  const q2 = `
+    WITH pick AS (
+      SELECT id FROM secrets
+      WHERE claimed = FALSE
+        AND id <> $1
+      ORDER BY created_at ASC
+      LIMIT 1
+    )
+    UPDATE secrets s
+      SET claimed = TRUE, claimed_by = $2
+      FROM pick
+      WHERE s.id = pick.id
+    RETURNING s.*;
+  `;
+  const r2 = await pool.query(q2, [excludeId, excludeSessionId]);
+  return r2.rows[0] || null;
 }
 
 function formatSecret(row, req) {
   if (!row) return null;
   if (row.type === 'audio') {
-    return { type: 'audio', url: `${req.protocol}://${req.get('host')}/uploads/${path.basename(row.audio_path)}` };
+    return { type: 'audio', url: `${req.protocol}://${req.get('host')}/api/audio/${row.id}` };
   }
-  return { type: 'text', text: row.text };
+  return { type: 'text', text: row.text_content };
 }
 
-// ---------- Rutas ----------
+// ====== Rutas ======
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-// Crear secreto de texto y devolver otro a cambio (si hay)
+// Texto
 app.post('/api/secrets/text', async (req, res) => {
   try {
     const sid = req.cookies.sid;
@@ -136,14 +136,13 @@ app.post('/api/secrets/text', async (req, res) => {
       return res.status(400).json({ error: 'Contenido no permitido por políticas.' });
     }
 
-    const insertedId = await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT INTO secrets (type, text, created_at, session_id)
-         VALUES (?, ?, ?, ?)`,
-        ['text', text, Date.now(), sid],
-        function (err) { if (err) reject(err); else resolve(this.lastID); }
-      );
-    });
+    const ins = await pool.query(
+      `INSERT INTO secrets (type, text_content, session_id)
+       VALUES ('text', $1, $2)
+       RETURNING id`,
+      [text, sid]
+    );
+    const insertedId = ins.rows[0].id;
 
     const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
@@ -154,21 +153,22 @@ app.post('/api/secrets/text', async (req, res) => {
   }
 });
 
-// Crear secreto de audio (voz real) y devolver otro a cambio (si hay)
+// Audio (voz real)
 app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   try {
     const sid = req.cookies.sid;
     if (!req.file) return res.status(400).json({ error: 'Falta archivo de audio.' });
-    const text = (req.body?.text || '').toString().trim() || null; // opcionalmente guardamos texto asociado
 
-    const insertedId = await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT INTO secrets (type, text, audio_path, created_at, session_id)
-         VALUES (?, ?, ?, ?, ?)`,
-        ['audio', text, req.file.path, Date.now(), sid],
-        function (err) { if (err) reject(err); else resolve(this.lastID); }
-      );
-    });
+    const text = (req.body?.text || '').toString().trim() || null;
+    const buffer = req.file.buffer; // viene de memoryStorage
+
+    const ins = await pool.query(
+      `INSERT INTO secrets (type, text_content, audio_data, session_id)
+       VALUES ('audio', $1, $2, $3)
+       RETURNING id`,
+      [text, buffer, sid]
+    );
+    const insertedId = ins.rows[0].id;
 
     const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
@@ -179,7 +179,7 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   }
 });
 
-// Pedir uno en cualquier momento (misma política)
+// Pedir uno cuando quieras
 app.get('/api/secrets/one', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
@@ -192,37 +192,48 @@ app.get('/api/secrets/one', async (req, res) => {
   }
 });
 
-// Contador de secretos disponibles
-app.get('/api/stats', (req, res) => {
-  const sid = req.cookies.sid || 'anon';
+// Servir audio desde la base (BYTEA → audio/webm)
+app.get('/api/audio/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).send('bad id');
+    const r = await pool.query(
+      `SELECT audio_data FROM secrets WHERE id = $1 AND type = 'audio'`,
+      [id]
+    );
+    if (!r.rows.length || !r.rows[0].audio_data) return res.status(404).send('not found');
+    const buf = r.rows[0].audio_data;
+    res.setHeader('Content-Type', 'audio/webm');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(buf);
+  } catch (e) {
+    console.error(e);
+    res.status(500).send('server error');
+  }
+});
 
-  // disponibles para ti (de otra sesión)
-  const qOther = `SELECT COUNT(*) AS c FROM secrets WHERE claimed = 0 AND session_id != ?`;
-  // disponibles totales sin reclamar
-  const qTotal = `SELECT COUNT(*) AS c FROM secrets WHERE claimed = 0`;
-
-  db.get(qOther, [sid], (e1, rowOther) => {
-    if (e1) {
-      console.error(e1);
-      return res.status(500).json({ error: 'stats other failed' });
-    }
-    db.get(qTotal, [], (e2, rowTotal) => {
-      if (e2) {
-        console.error(e2);
-        return res.status(500).json({ error: 'stats total failed' });
-      }
-      res.json({
-        available_for_you: rowOther?.c ?? 0,
-        available_total: rowTotal?.c ?? 0
-      });
+// Stats (contador)
+app.get('/api/stats', async (req, res) => {
+  try {
+    const sid = req.cookies.sid || 'anon';
+    const r1 = await pool.query(
+      `SELECT COUNT(*)::int AS c
+       FROM secrets WHERE claimed = FALSE AND session_id <> $1`,
+      [sid]
+    );
+    const r2 = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM secrets WHERE claimed = FALSE`
+    );
+    res.json({
+      available_for_you: r1.rows[0].c,
+      available_total: r2.rows[0].c
     });
-  });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'stats failed' });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`✅ Servidor en http://localhost:${PORT}`);
-  console.log(`📁 DATA_DIR: ${DATA_DIR}`);
-  console.log(`💾 DB: ${dbPath}`);
-  console.log(`📂 Uploads: ${uploadsDir}`);
 });
-

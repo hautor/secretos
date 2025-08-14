@@ -1,4 +1,7 @@
-// server.js — intercambio por IP (con fallback), voz real del usuario
+// server.js — Intercambio 1×1 por envío, sin bloquear por misma IP/sesión.
+// Regla: tras insertar, intenta devolver otro secreto distinto.
+// 1) Prioriza de OTRA sesión (más “justo”).
+// 2) Si no hay, permite de la MISMA sesión (pero nunca el recién insertado).
 
 const express = require('express');
 const multer = require('multer');
@@ -8,12 +11,11 @@ const fs = require('fs');
 const cookieParser = require('cookie-parser');
 const { nanoid } = require('nanoid');
 const cors = require('cors');
-const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- Ruta de datos ----------
+// ---------- Ruta de datos configurable ----------
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 fs.mkdirSync(path.join(DATA_DIR, 'uploads'), { recursive: true });
 
@@ -39,78 +41,67 @@ db.serialize(() => {
     claimed INTEGER DEFAULT 0,
     claimed_by TEXT
   )`);
-
-  // Migración ligera: añadir ip_hash si no existe
-  db.get(`PRAGMA table_info(secrets)`, (err) => {
-    if (err) return console.error('PRAGMA error', err);
-    db.all(`PRAGMA table_info(secrets)`, (e, rows) => {
-      if (e) return console.error(e);
-      const hasIpHash = rows.some(r => r.name === 'ip_hash');
-      if (!hasIpHash) {
-        db.run(`ALTER TABLE secrets ADD COLUMN ip_hash TEXT`, (e2) => {
-          if (e2) console.error('ALTER TABLE ip_hash falló (puede existir ya):', e2?.message);
-        });
-      }
-    });
-  });
 });
 
-// ---------- Helpers ----------
-app.set('trust proxy', true); // importante en Render para leer X-Forwarded-For
+// ---------- Middlewares ----------
+app.use(cors({ origin: true, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 
-function getClientIp(req) {
-  // Render/Proxies: usa el primer IP de X-Forwarded-For si existe
-  const xfwd = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim();
-  const ip = xfwd || req.ip || req.connection?.remoteAddress || '';
-  return ip;
-}
-function hashIp(ip) {
-  try { return crypto.createHash('sha256').update(ip).digest('hex'); }
-  catch { return ''; }
-}
+// Estáticos
+app.use('/uploads', express.static(uploadsDir));
+app.use(express.static(path.join(__dirname, 'public')));
 
+// Sesión anónima simple por cookie (no bloquea el intercambio)
+app.use((req, res, next) => {
+  if (!req.cookies.sid) {
+    res.cookie('sid', nanoid(16), { httpOnly: false, sameSite: 'lax' });
+  }
+  next();
+});
+
+// ---------- Utilidades ----------
 function violatesPolicy(text = '') {
   const banned = [/porn\w*/i, /violaci[oó]n/i, /abuso\s*infantil/i, /terrorismo/i, /incesto/i];
   return banned.some((re) => re.test(text));
 }
 
-// Selecciona un secreto disponible con esta prioridad:
-// 1) De OTRA IP, no reclamado, lo más antiguo.
-// 2) Si no hay, de la MISMA IP pero que NO sea el id que acabamos de insertar.
-//    (Esto permite que varias personas desde la misma IP intercambien sin bloqueo.)
-function getAvailableSecretByIp(ipHash, excludeId) {
+// Intenta obtener un secreto no reclamado distinto al recien insertado.
+// Paso 1: otra sesión, FIFO. Paso 2: misma sesión (evitando el recién insertado), FIFO.
+function getExchangeSecret(excludeSessionId, excludeId) {
   return new Promise((resolve, reject) => {
-    // Primero, otra IP
+    // 1) Otra sesión
     db.get(
       `SELECT * FROM secrets
-       WHERE claimed = 0 AND COALESCE(ip_hash,'') != ?
+       WHERE claimed = 0
+         AND id != ?
+         AND session_id != ?
        ORDER BY created_at ASC
        LIMIT 1`,
-      [ipHash],
+      [excludeId, excludeSessionId],
       (err, row) => {
         if (err) return reject(err);
         if (row) {
           return db.run(
             `UPDATE secrets SET claimed = 1, claimed_by = ? WHERE id = ?`,
-            [ipHash, row.id],
+            [excludeSessionId, row.id],
             (err2) => (err2 ? reject(err2) : resolve(row))
           );
         }
-        // Fallback: misma IP, evitando el recién insertado
+        // 2) Misma sesión (evita devolver el mismo recién insertado)
         db.get(
           `SELECT * FROM secrets
            WHERE claimed = 0
-             AND (COALESCE(ip_hash,'') = ?)
              AND id != ?
            ORDER BY created_at ASC
            LIMIT 1`,
-          [ipHash, excludeId || -1],
+          [excludeId],
           (err3, row2) => {
             if (err3) return reject(err3);
             if (!row2) return resolve(null);
             db.run(
               `UPDATE secrets SET claimed = 1, claimed_by = ? WHERE id = ?`,
-              [ipHash, row2.id],
+              [excludeSessionId, row2.id],
               (err4) => (err4 ? reject(err4) : resolve(row2))
             );
           }
@@ -128,28 +119,13 @@ function formatSecret(row, req) {
   return { type: 'text', text: row.text };
 }
 
-// ---------- Middlewares ----------
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '1mb' }));
-app.use(cookieParser());
-app.use('/uploads', express.static(uploadsDir));
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Sesión anónima (seguimos poniéndola, aunque ya no bloquea el intercambio)
-app.use((req, res, next) => {
-  if (!req.cookies.sid) {
-    res.cookie('sid', nanoid(16), { httpOnly: false, sameSite: 'lax' });
-  }
-  next();
-});
-
 // ---------- Rutas ----------
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
+// Crear secreto de texto y devolver otro a cambio (si hay)
 app.post('/api/secrets/text', async (req, res) => {
   try {
     const sid = req.cookies.sid;
-    const ipHash = hashIp(getClientIp(req));
     let { text } = req.body || {};
     text = (text || '').toString().trim();
 
@@ -162,14 +138,14 @@ app.post('/api/secrets/text', async (req, res) => {
 
     const insertedId = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO secrets (type, text, created_at, session_id, ip_hash)
-         VALUES (?, ?, ?, ?, ?)`,
-        ['text', text, Date.now(), sid, ipHash],
+        `INSERT INTO secrets (type, text, created_at, session_id)
+         VALUES (?, ?, ?, ?)`,
+        ['text', text, Date.now(), sid],
         function (err) { if (err) reject(err); else resolve(this.lastID); }
       );
     });
 
-    const other = await getAvailableSecretByIp(ipHash, insertedId);
+    const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
@@ -178,25 +154,23 @@ app.post('/api/secrets/text', async (req, res) => {
   }
 });
 
+// Crear secreto de audio (voz real) y devolver otro a cambio (si hay)
 app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   try {
     const sid = req.cookies.sid;
-    const ipHash = hashIp(getClientIp(req));
     if (!req.file) return res.status(400).json({ error: 'Falta archivo de audio.' });
-
-    const text = (req.body?.text || '').toString().trim() || null;
+    const text = (req.body?.text || '').toString().trim() || null; // opcionalmente guardamos texto asociado
 
     const insertedId = await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO secrets (type, text, audio_path, created_at, session_id, ip_hash)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        ['audio', text, req.file.path, Date.now(), sid, ipHash],
+        `INSERT INTO secrets (type, text, audio_path, created_at, session_id)
+         VALUES (?, ?, ?, ?, ?)`,
+        ['audio', text, req.file.path, Date.now(), sid],
         function (err) { if (err) reject(err); else resolve(this.lastID); }
       );
     });
 
-    // Intercambio inmediato por cada envío
-    const other = await getAvailableSecretByIp(ipHash, insertedId);
+    const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
@@ -205,17 +179,44 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   }
 });
 
-// Pedir uno en cualquier momento (misma política por IP)
+// Pedir uno en cualquier momento (misma política)
 app.get('/api/secrets/one', async (req, res) => {
   try {
-    const ipHash = hashIp(getClientIp(req));
-    const other = await getAvailableSecretByIp(ipHash, /*excludeId*/ -1);
+    const sid = req.cookies.sid || 'anon';
+    const other = await getExchangeSecret(sid, -1);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Error de servidor' });
   }
+});
+
+// Contador de secretos disponibles
+app.get('/api/stats', (req, res) => {
+  const sid = req.cookies.sid || 'anon';
+
+  // disponibles para ti (de otra sesión)
+  const qOther = `SELECT COUNT(*) AS c FROM secrets WHERE claimed = 0 AND session_id != ?`;
+  // disponibles totales sin reclamar
+  const qTotal = `SELECT COUNT(*) AS c FROM secrets WHERE claimed = 0`;
+
+  db.get(qOther, [sid], (e1, rowOther) => {
+    if (e1) {
+      console.error(e1);
+      return res.status(500).json({ error: 'stats other failed' });
+    }
+    db.get(qTotal, [], (e2, rowTotal) => {
+      if (e2) {
+        console.error(e2);
+        return res.status(500).json({ error: 'stats total failed' });
+      }
+      res.json({
+        available_for_you: rowOther?.c ?? 0,
+        available_total: rowTotal?.c ?? 0
+      });
+    });
+  });
 });
 
 app.listen(PORT, () => {
@@ -224,3 +225,4 @@ app.listen(PORT, () => {
   console.log(`💾 DB: ${dbPath}`);
   console.log(`📂 Uploads: ${uploadsDir}`);
 });
+

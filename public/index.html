@@ -5,12 +5,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mr. Chow's Hole</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    /* Pulso suave al reproducir audio */
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.15); opacity: 0.8; }
+    }
+    .pulsing {
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+  </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
   <main class="max-w-xl mx-auto p-6">
     <header class="mb-6 text-center">
-      <h1 class="text-3xl font-bold tracking-tight">Mr. Chow's Hole</h1>
-      <p class="text-slate-600 mt-1">Cuenta o escribe un secreto. A cambio, escucharás el de otra persona.</p>
+      <div class="flex flex-col items-center gap-2">
+        <!-- Logo minimalista -->
+        <svg aria-hidden="true" width="72" height="72" viewBox="0 0 64 64" class="drop-shadow-sm">
+          <defs>
+            <radialGradient id="hole" cx="50%" cy="50%" r="60%">
+              <stop offset="0%"  stop-color="#000"/>
+              <stop offset="70%" stop-color="#000"/>
+              <stop offset="100%" stop-color="#111"/>
+            </radialGradient>
+          </defs>
+          <circle cx="32" cy="32" r="24" fill="url(#hole)"/>
+          <ellipse cx="26" cy="26" rx="6" ry="3.5" fill="#fff" opacity="0.08"/>
+        </svg>
+        <h1 class="text-3xl font-bold tracking-tight">Mr. Chow's Hole</h1>
+        <p class="text-slate-600 mt-1">Cuenta o escribe un secreto. A cambio, escucharás el de otra persona.</p>
+      </div>
     </header>
 
     <section class="bg-white rounded-2xl shadow p-5 space-y-4">
@@ -180,6 +205,17 @@
       }
     });
 
+    // Animación de pulso mientras suena el audio
+    player.addEventListener('play', () => {
+      audioIcon.classList.add('pulsing');
+    });
+    player.addEventListener('pause', () => {
+      audioIcon.classList.remove('pulsing');
+    });
+    player.addEventListener('ended', () => {
+      audioIcon.classList.remove('pulsing');
+    });
+
     // Enviar texto
     sendText.onclick = async () => {
       const text = (secretText.value || '').trim();
@@ -284,4 +320,3 @@
   </script>
 </body>
 </html>
-

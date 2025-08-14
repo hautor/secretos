@@ -1,0 +1,9 @@
+﻿# Node
+node_modules/
+npm-debug.log*
+.DS_Store
+
+# Archivos generados por la app
+uploads/
+secrets.db
+/data/

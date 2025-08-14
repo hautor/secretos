@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Intercambio de Secretos</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 min-h-screen">
+  <main class="max-w-xl mx-auto p-6">
+    <header class="mb-6 text-center">
+      <h1 class="text-3xl font-bold tracking-tight">Intercambio de Secretos</h1>
+      <p class="text-slate-600 mt-1">Cuenta o escribe un secreto. A cambio, escucharás el de otra persona.</p>
+    </header>
+
+    <section class="bg-white rounded-2xl shadow p-5 space-y-4">
+      <div class="flex gap-2 justify-center">
+        <button id="modeText" class="px-4 py-2 rounded-xl bg-slate-900 text-white">Texto</button>
+        <button id="modeAudio" class="px-4 py-2 rounded-xl bg-slate-200">Audio</button>
+      </div>
+
+      <!-- Texto -->
+      <div id="textPane" class="space-y-3">
+        <label class="block text-sm font-medium">Tu secreto (5–280 caracteres)</label>
+        <textarea id="secretText" maxlength="280" rows="4" class="w-full rounded-xl border p-3" placeholder="Escribe aquí..."></textarea>
+        <div class="flex justify-between items-center">
+          <span id="charCount" class="text-xs text-slate-500">0/280</span>
+          <button id="sendText" class="px-4 py-2 rounded-xl bg-indigo-600 text-white">Enviar</button>
+        </div>
+      </div>
+
+      <!-- Audio -->
+      <div id="audioPane" class="space-y-3 hidden">
+        <p class="text-sm text-slate-600">Graba tu secreto (máx. ~60s)</p>
+        <div class="flex gap-2">
+          <button id="recBtn" class="px-4 py-2 rounded-xl bg-emerald-600 text-white">Grabar</button>
+          <button id="stopBtn" class="px-4 py-2 rounded-xl bg-slate-200" disabled>Detener</button>
+          <button id="sendAudio" class="px-4 py-2 rounded-xl bg-indigo-600 text-white" disabled>Enviar</button>
+        </div>
+        <audio id="preview" controls class="w-full hidden"></audio>
+      </div>
+
+      <div id="status" class="text-sm text-slate-600"></div>
+    </section>
+
+    <section class="mt-6 bg-white rounded-2xl shadow p-5">
+      <h2 class="text-xl font-semibold mb-2">Secreto recibido</h2>
+      <div id="result" class="text-slate-800"></div>
+      <audio id="player" controls class="w-full mt-3 hidden"></audio>
+      <div class="mt-3">
+        <button id="tryFetch" class="px-3 py-2 rounded-xl bg-slate-200">Intentar conseguir uno ahora</button>
+      </div>
+    </section>
+
+    <p class="text-xs text-slate-500 mt-4">No envíes datos personales ni contenido ilegal. Este prototipo aplica un filtro básico.</p>
+  </main>
+
+  <script>
+    const modeTextBtn = document.getElementById('modeText');
+    const modeAudioBtn = document.getElementById('modeAudio');
+    const textPane = document.getElementById('textPane');
+    const audioPane = document.getElementById('audioPane');
+
+    const secretText = document.getElementById('secretText');
+    const charCount = document.getElementById('charCount');
+    const sendText = document.getElementById('sendText');
+
+    const recBtn = document.getElementById('recBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const sendAudio = document.getElementById('sendAudio');
+    const preview = document.getElementById('preview');
+
+    const statusEl = document.getElementById('status');
+    const result = document.getElementById('result');
+    const player = document.getElementById('player');
+    const tryFetch = document.getElementById('tryFetch');
+
+    let mediaRecorder, chunks = [], blob;
+
+    // UI mode toggle
+    function setMode(mode) {
+      if (mode === 'text') {
+        textPane.classList.remove('hidden');
+        audioPane.classList.add('hidden');
+        modeTextBtn.classList.add('bg-slate-900','text-white');
+        modeAudioBtn.classList.remove('bg-slate-900','text-white');
+        modeAudioBtn.classList.add('bg-slate-200');
+      } else {
+        textPane.classList.add('hidden');
+        audioPane.classList.remove('hidden');
+        modeAudioBtn.classList.add('bg-slate-900','text-white');
+        modeTextBtn.classList.remove('bg-slate-900','text-white');
+        modeTextBtn.classList.add('bg-slate-200');
+      }
+    }
+
+    modeTextBtn.onclick = () => setMode('text');
+    modeAudioBtn.onclick = () => setMode('audio');
+
+    // Contador de caracteres
+    secretText.addEventListener('input', () => {
+      charCount.textContent = `${secretText.value.length}/280`;
+    });
+
+    function showStatus(msg) {
+      statusEl.textContent = msg || '';
+    }
+
+    function speak(text) {
+      if ('speechSynthesis' in window) {
+        const ut = new SpeechSynthesisUtterance(text);
+        ut.lang = 'es-ES';
+        window.speechSynthesis.speak(ut);
+      }
+    }
+
+    function displaySecret(payload) {
+      if (!payload) return;
+      result.innerHTML = '';
+      player.classList.add('hidden');
+
+      if (payload.type === 'audio') {
+        player.src = payload.url;
+        player.classList.remove('hidden');
+        player.play().catch(()=>{});
+      } else if (payload.type === 'text') {
+        const p = document.createElement('p');
+        p.textContent = payload.text;
+        result.appendChild(p);
+        speak(payload.text);
+      }
+    }
+
+    // Enviar texto
+    sendText.onclick = async () => {
+      const text = (secretText.value || '').trim();
+      showStatus('Enviando...');
+      try {
+        const res = await fetch('/api/secrets/text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        if (res.status === 204) {
+          showStatus('Gracias por tu secreto. Aún no hay otro disponible. Pulsa "Intentar conseguir uno ahora" más tarde.');
+          return;
+        }
+        const data = await res.json();
+        displaySecret(data);
+        showStatus('');
+        secretText.value = '';
+        charCount.textContent = '0/280';
+      } catch (e) {
+        showStatus('Error enviando secreto.');
+      }
+    };
+
+    // Grabación audio
+    recBtn.onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        chunks = [];
+        mediaRecorder.ondataavailable = e => chunks.push(e.data);
+        mediaRecorder.onstop = () => {
+          blob = new Blob(chunks, { type: 'audio/webm' });
+          preview.src = URL.createObjectURL(blob);
+          preview.classList.remove('hidden');
+          sendAudio.disabled = false;
+        };
+        mediaRecorder.start();
+        recBtn.disabled = true;
+        stopBtn.disabled = false;
+        showStatus('Grabando...');
+        setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); }, 60000);
+      } catch (e) {
+        showStatus('No se pudo acceder al micrófono.');
+      }
+    };
+
+    stopBtn.onclick = () => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        recBtn.disabled = false;
+        stopBtn.disabled = true;
+        showStatus('Grabación detenida.');
+      }
+    };
+
+    sendAudio.onclick = async () => {
+      if (!blob) return;
+      showStatus('Enviando audio...');
+      const fd = new FormData();
+      fd.append('audio', blob, 'secret.webm');
+      try {
+        const res = await fetch('/api/secrets/audio', { method: 'POST', body: fd });
+        if (res.status === 204) {
+          showStatus('Gracias por tu secreto. Aún no hay otro disponible. Pulsa "Intentar conseguir uno ahora" más tarde.');
+          return;
+        }
+        const data = await res.json();
+        displaySecret(data);
+        showStatus('');
+        preview.classList.add('hidden');
+        sendAudio.disabled = true;
+      } catch (e) {
+        showStatus('Error enviando audio.');
+      }
+    };
+
+    // Intentar obtener uno aleatorio
+    tryFetch.onclick = async () => {
+      showStatus('Buscando secreto...');
+      try {
+        const res = await fetch('/api/secrets/one');
+        if (res.status === 204) {
+          showStatus('De momento no hay uno disponible. Prueba más tarde.');
+          return;
+        }
+        const data = await res.json();
+        displaySecret(data);
+        showStatus('');
+      } catch (e) {
+        showStatus('Error al buscar.');
+      }
+    };
+  </script>
+</body>
+</html>

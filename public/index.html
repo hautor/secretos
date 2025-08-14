@@ -106,14 +106,6 @@
       statusEl.textContent = msg || '';
     }
 
-    function speak(text) {
-      if ('speechSynthesis' in window) {
-        const ut = new SpeechSynthesisUtterance(text);
-        ut.lang = 'es-ES';
-        window.speechSynthesis.speak(ut);
-      }
-    }
-
     function displaySecret(payload) {
       if (!payload) return;
       result.innerHTML = '';
@@ -127,7 +119,6 @@
         const p = document.createElement('p');
         p.textContent = payload.text;
         result.appendChild(p);
-        speak(payload.text);
       }
     }
 

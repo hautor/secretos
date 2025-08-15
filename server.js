@@ -110,7 +110,7 @@ async function getExchangeSecret(excludeSessionId, excludeId) {
       SET claimed = TRUE, claimed_by = $2
       FROM pick
       WHERE s.id = pick.id
-    RETURNING s.*;
+    RETURNING s::*;
   `;
   const r1 = await pool.query(q1, [excludeId, excludeSessionId]);
   if (r1.rows.length) return r1.rows[0];
@@ -127,7 +127,7 @@ async function getExchangeSecret(excludeSessionId, excludeId) {
       SET claimed = TRUE, claimed_by = $2
       FROM pick
       WHERE s.id = pick.id
-    RETURNING s.*;
+    RETURNING s::*;
   `;
   const r2 = await pool.query(q2, [excludeId, excludeSessionId]);
   return r2.rows[0] || null;
@@ -236,21 +236,31 @@ app.get('/api/audio/:id', async (req, res) => {
   }
 });
 
-// Stats (contador)
+// Stats (contador) — ampliado con exchanged_total y created_total
 app.get('/api/stats', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
-    const r1 = await pool.query(
+
+    const rAvailForYou = await pool.query(
       `SELECT COUNT(*)::int AS c
        FROM secrets WHERE claimed = FALSE AND session_id <> $1`,
       [sid]
     );
-    const r2 = await pool.query(
+    const rAvailTotal = await pool.query(
       `SELECT COUNT(*)::int AS c FROM secrets WHERE claimed = FALSE`
     );
+    const rExchanged = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM secrets WHERE claimed = TRUE`
+    );
+    const rCreated = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM secrets`
+    );
+
     res.json({
-      available_for_you: r1.rows[0].c,
-      available_total: r2.rows[0].c
+      available_for_you: rAvailForYou.rows[0].c,
+      available_total: rAvailTotal.rows[0].c,
+      exchanged_total: rExchanged.rows[0].c,  // 👈 NUEVO
+      created_total: rCreated.rows[0].c       // 👈 opcional
     });
   } catch (e) {
     console.error(e);

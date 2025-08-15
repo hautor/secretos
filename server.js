@@ -1,8 +1,6 @@
 // server.js — Persistencia sin disco (Render Free) con PostgreSQL (Neon/Supabase/Railway)
 // - Guarda textos y AUDIOS (voz real) dentro de Postgres (BYTEA)
 // - Intercambio 1x1 por envío (prioriza otra sesión; fallback cualquiera distinto)
-// - Endpoints: /api/secrets/text, /api/secrets/audio, /api/secrets/one
-//              /api/audio/:id, /api/stats, /api/health
 
 const express = require('express');
 const multer = require('multer');
@@ -24,6 +22,9 @@ if (!DATABASE_URL) {
   console.error('❌ DATABASE_URL no está definida. Ve a Render → Environment y añádela con la cadena de Neon (termina en ?sslmode=require).');
   process.exit(1);
 }
+
+// Para que req.secure funcione detrás de Render / proxies
+app.set('trust proxy', 1);
 
 // Log de depuración (solo host, sin credenciales)
 try {
@@ -58,7 +59,6 @@ async function ensureSchema() {
   console.log('✅ Esquema verificado/creado en Postgres.');
 }
 
-// Arranque: comprobamos esquema antes de aceptar tráfico
 ensureSchema().catch((e) => {
   console.error('❌ Error ensureSchema:', e);
   process.exit(1);
@@ -71,14 +71,17 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
-// ⚠️ IMPORTANTE: sesión anónima ANTES de servir estáticos y ANTES de las rutas
+// Sesión anónima ANTES de estáticos y rutas
 app.use((req, res, next) => {
-  if (!req.cookies.sid) {
-    const sid = nanoid(16);
-    // que esté disponible ya en ESTA petición
+  let sid = req.cookies.sid;
+  if (!sid) {
+    sid = nanoid(16);
+    // cookie segura si vamos por https (Render)
+    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    res.cookie('sid', sid, { httpOnly: false, sameSite: 'lax', secure: isSecure });
+    // disponible en esta misma request
     req.cookies.sid = sid;
-    // y que el navegador la guarde para las siguientes
-    res.cookie('sid', sid, { httpOnly: false, sameSite: 'lax' });
+    console.log(`🧁 Nueva SID asignada: ${sid}`);
   }
   next();
 });
@@ -99,7 +102,7 @@ function violatesPolicy(text = '') {
   return banned.some((re) => re.test(text));
 }
 
-// Selecciona un secreto distinto al recien insertado.
+// Selecciona un secreto distinto al recién insertado.
 // 1) Otra sesión FIFO; 2) cualquiera distinto FIFO.
 async function getExchangeSecret(excludeSessionId, excludeId) {
   const q1 = `
@@ -115,10 +118,13 @@ async function getExchangeSecret(excludeSessionId, excludeId) {
       SET claimed = TRUE, claimed_by = $2
       FROM pick
       WHERE s.id = pick.id
-    RETURNING s::*;
+    RETURNING s.*;
   `;
   const r1 = await pool.query(q1, [excludeId, excludeSessionId]);
-  if (r1.rows.length) return r1.rows[0];
+  if (r1.rows.length) {
+    console.log(`🔁 Emparejado (otra sesión). Devuelvo id=${r1.rows[0].id} a sid=${excludeSessionId}`);
+    return r1.rows[0];
+  }
 
   const q2 = `
     WITH pick AS (
@@ -132,9 +138,14 @@ async function getExchangeSecret(excludeSessionId, excludeId) {
       SET claimed = TRUE, claimed_by = $2
       FROM pick
       WHERE s.id = pick.id
-    RETURNING s::*;
+    RETURNING s.*;
   `;
   const r2 = await pool.query(q2, [excludeId, excludeSessionId]);
+  if (r2.rows.length) {
+    console.log(`🔁 Emparejado (misma sesión permitido). Devuelvo id=${r2.rows[0].id} a sid=${excludeSessionId}`);
+  } else {
+    console.log('⛔ No hay secreto disponible para emparejar ahora mismo.');
+  }
   return r2.rows[0] || null;
 }
 
@@ -154,7 +165,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // Texto
 app.post('/api/secrets/text', async (req, res) => {
   try {
-    const sid = req.cookies.sid; // ya garantizada por el middleware
+    const sid = req.cookies.sid;
     let { text } = req.body || {};
     text = (text || '').toString().trim();
 
@@ -172,12 +183,13 @@ app.post('/api/secrets/text', async (req, res) => {
       [text, sid]
     );
     const insertedId = ins.rows[0].id;
+    console.log(`✍️ Insertado texto id=${insertedId} sid=${sid}`);
 
     const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
-    console.error(e);
+    console.error('❌ /api/secrets/text error:', e);
     res.status(500).json({ error: 'Error de servidor' });
   }
 });
@@ -185,7 +197,7 @@ app.post('/api/secrets/text', async (req, res) => {
 // Audio (voz real)
 app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   try {
-    const sid = req.cookies.sid; // ya garantizada
+    const sid = req.cookies.sid;
     if (!req.file) return res.status(400).json({ error: 'Falta archivo de audio.' });
 
     const text = (req.body?.text || '').toString().trim() || null;
@@ -198,12 +210,13 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
       [text, buffer, sid]
     );
     const insertedId = ins.rows[0].id;
+    console.log(`🎙️ Insertado audio id=${insertedId} sid=${sid} bytes=${buffer.length}`);
 
     const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
-    console.error(e);
+    console.error('❌ /api/secrets/audio error:', e);
     res.status(500).json({ error: 'Error de servidor' });
   }
 });
@@ -212,11 +225,12 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
 app.get('/api/secrets/one', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
+    console.log(`🔎 /api/secrets/one solicitado por sid=${sid}`);
     const other = await getExchangeSecret(sid, -1);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
   } catch (e) {
-    console.error(e);
+    console.error('❌ /api/secrets/one error:', e);
     res.status(500).json({ error: 'Error de servidor' });
   }
 });
@@ -236,7 +250,7 @@ app.get('/api/audio/:id', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
     res.send(buf);
   } catch (e) {
-    console.error(e);
+    console.error('❌ /api/audio/:id error:', e);
     res.status(500).send('server error');
   }
 });
@@ -268,8 +282,25 @@ app.get('/api/stats', async (req, res) => {
       created_total: rCreated.rows[0].c
     });
   } catch (e) {
-    console.error(e);
+    console.error('❌ /api/stats error:', e);
     res.status(500).json({ error: 'stats failed' });
+  }
+});
+
+/* ====== DEBUG (temporal) ======
+   Mira qué hay en la tabla para diagnosticar */
+app.get('/api/debug/peek', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT id, type, session_id, claimed, claimed_by, created_at
+      FROM secrets
+      ORDER BY created_at DESC
+      LIMIT 20
+    `);
+    res.json({ rows: r.rows });
+  } catch (e) {
+    console.error('❌ /api/debug/peek error:', e);
+    res.status(500).json({ error: 'debug failed' });
   }
 });
 

@@ -6,6 +6,18 @@
   <title>Mr. Chow's Hole</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+
+  <!-- Open Graph / Twitter -->
+  <meta property="og:title" content="Mr. Chow's Hole — Intercambia secretos anónimos" />
+  <meta property="og:description" content="Cuenta o graba un secreto y recibe uno de otra persona. Sin registros. 100% anónimo." />
+  <meta property="og:image" content="https://secretos-t3nu.onrender.com/favicon.svg" />
+  <meta property="og:url" content="https://secretos-t3nu.onrender.com" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Mr. Chow's Hole — Intercambia secretos anónimos" />
+  <meta name="twitter:description" content="Cuenta o graba un secreto y recibe uno de otra persona. Sin registros. 100% anónimo." />
+  <meta name="twitter:image" content="https://secretos-t3nu.onrender.com/favicon.svg" />
+
   <style>
     /* Pulso suave al reproducir audio */
     @keyframes pulse {
@@ -35,6 +47,18 @@
         </svg>
         <h1 class="text-3xl font-bold tracking-tight">Mr. Chow's Hole</h1>
         <p class="text-slate-600 mt-1">Cuenta o escribe un secreto. A cambio, escucharás el de otra persona.</p>
+      </div>
+
+      <!-- Contador público -->
+      <div class="mt-3 text-sm text-slate-600">
+        Secretos intercambiados: <strong id="countExchanged">—</strong>
+      </div>
+
+      <!-- Botones compartir -->
+      <div class="flex justify-center gap-3 mt-3">
+        <button id="shareWhatsApp" class="px-3 py-1 rounded-lg bg-green-500 text-white text-sm hover:bg-green-600">WhatsApp</button>
+        <button id="shareTwitter" class="px-3 py-1 rounded-lg bg-sky-500 text-white text-sm hover:bg-sky-600">X / Twitter</button>
+        <button id="copyLink" class="px-3 py-1 rounded-lg bg-gray-300 text-sm hover:bg-gray-400">Copiar enlace</button>
       </div>
     </header>
 
@@ -84,7 +108,6 @@
 
       <!-- Contenedor del icono + reproductor -->
       <div id="audioWrapper" class="flex items-center gap-2 mt-3 hidden">
-        <!-- Icono altavoz clicable -->
         <svg id="audioIcon" xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-emerald-600 cursor-pointer hover:text-emerald-800 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M11 5L6 9H2v6h4l5 4V5zM15.54 8.46a5 5 0 010 7.07M19.07 4.93a10 10 0 010 14.14" />
@@ -101,6 +124,15 @@
   </main>
 
   <script>
+    const shareURL = "https://secretos-t3nu.onrender.com";
+    const shareText = "Cuenta o graba un secreto y recibe otro anónimo en Mr. Chow's Hole";
+    document.getElementById("shareWhatsApp").onclick = () => window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(shareText + " " + shareURL)}`, "_blank");
+    document.getElementById("shareTwitter").onclick = () => window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}&url=${encodeURIComponent(shareURL)}`, "_blank");
+    document.getElementById("copyLink").onclick = async () => {
+      try { await navigator.clipboard.writeText(shareURL); alert("Enlace copiado"); }
+      catch { alert("No se pudo copiar el enlace"); }
+    };
+
     const modeTextBtn = document.getElementById('modeText');
     const modeAudioBtn = document.getElementById('modeAudio');
     const textPane = document.getElementById('textPane');
@@ -122,200 +154,100 @@
     const audioWrapper = document.getElementById('audioWrapper');
     const audioIcon = document.getElementById('audioIcon');
 
-    // Stats UI
     const countOther = document.getElementById('countOther');
     const countTotal = document.getElementById('countTotal');
+    const countExchanged = document.getElementById('countExchanged');
     const refreshStatsBtn = document.getElementById('refreshStats');
 
     let mediaRecorder, chunks = [], blob;
 
-    // UI mode toggle
     function setMode(mode) {
       if (mode === 'text') {
-        textPane.classList.remove('hidden');
-        audioPane.classList.add('hidden');
+        textPane.classList.remove('hidden'); audioPane.classList.add('hidden');
         modeTextBtn.classList.add('bg-slate-900','text-white');
-        modeAudioBtn.classList.remove('bg-slate-900','text-white');
-        modeAudioBtn.classList.add('bg-slate-200');
+        modeAudioBtn.classList.remove('bg-slate-900','text-white'); modeAudioBtn.classList.add('bg-slate-200');
       } else {
-        textPane.classList.add('hidden');
-        audioPane.classList.remove('hidden');
+        textPane.classList.add('hidden'); audioPane.classList.remove('hidden');
         modeAudioBtn.classList.add('bg-slate-900','text-white');
-        modeTextBtn.classList.remove('bg-slate-900','text-white');
-        modeTextBtn.classList.add('bg-slate-200');
+        modeTextBtn.classList.remove('bg-slate-900','text-white'); modeTextBtn.classList.add('bg-slate-200');
       }
     }
-
     modeTextBtn.onclick = () => setMode('text');
     modeAudioBtn.onclick = () => setMode('audio');
 
-    // Contador de caracteres
-    secretText.addEventListener('input', () => {
-      charCount.textContent = `${secretText.value.length}/280`;
-    });
+    secretText.addEventListener('input', () => { charCount.textContent = `${secretText.value.length}/280`; });
+    function showStatus(msg) { statusEl.textContent = msg || ''; }
 
-    function showStatus(msg) {
-      statusEl.textContent = msg || '';
-    }
-
-    // ----- Stats -----
     async function loadStats() {
       try {
         const res = await fetch('/api/stats');
-        if (!res.ok) throw new Error('bad status');
+        if (!res.ok) throw new Error();
         const data = await res.json();
         countOther.textContent = data.available_for_you ?? 0;
         countTotal.textContent = data.available_total ?? 0;
-
+        if (countExchanged) countExchanged.textContent = data.exchanged_total ?? 0;
         const hasForYou = Number(countOther.textContent) > 0;
         countOther.classList.toggle('text-emerald-600', hasForYou);
         countOther.classList.toggle('text-slate-600', !hasForYou);
       } catch {
-        countOther.textContent = '—';
-        countTotal.textContent = '—';
+        countOther.textContent = '—'; countTotal.textContent = '—';
+        if (countExchanged) countExchanged.textContent = '—';
       }
     }
-    refreshStatsBtn.addEventListener('click', loadStats);
-    loadStats();
-    setInterval(loadStats, 10000);
+    refreshStatsBtn.onclick = loadStats;
+    loadStats(); setInterval(loadStats, 10000);
 
     function displaySecret(payload) {
       if (!payload) return;
-      result.innerHTML = '';
-      audioWrapper.classList.add('hidden');
-      player.pause();
-      player.removeAttribute('src');
-
-      if (payload.type === 'audio') {
-        player.src = payload.url;
-        audioWrapper.classList.remove('hidden');
-      } else if (payload.type === 'text') {
-        const p = document.createElement('p');
-        p.textContent = payload.text;
-        result.appendChild(p);
-      }
+      result.innerHTML = ''; audioWrapper.classList.add('hidden');
+      player.pause(); player.removeAttribute('src');
+      if (payload.type === 'audio') { player.src = payload.url; audioWrapper.classList.remove('hidden'); }
+      else if (payload.type === 'text') { const p = document.createElement('p'); p.textContent = payload.text; result.appendChild(p); }
     }
 
-    // Click en icono de altavoz → reproducir/pausar
-    audioIcon.addEventListener('click', () => {
-      if (player.paused) {
-        player.play().catch(()=>{});
-      } else {
-        player.pause();
-      }
-    });
+    audioIcon.onclick = () => { if (player.paused) player.play().catch(()=>{}); else player.pause(); };
+    player.onplay = () => audioIcon.classList.add('pulsing');
+    player.onpause = player.onended = () => audioIcon.classList.remove('pulsing');
 
-    // Animación de pulso mientras suena el audio
-    player.addEventListener('play', () => {
-      audioIcon.classList.add('pulsing');
-    });
-    player.addEventListener('pause', () => {
-      audioIcon.classList.remove('pulsing');
-    });
-    player.addEventListener('ended', () => {
-      audioIcon.classList.remove('pulsing');
-    });
-
-    // Enviar texto
     sendText.onclick = async () => {
       const text = (secretText.value || '').trim();
       showStatus('Enviando...');
       try {
-        const res = await fetch('/api/secrets/text', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
-        if (res.status === 204) {
-          showStatus('Gracias por tu secreto. Aún no hay otro disponible. Pulsa "Intentar conseguir uno ahora" más tarde.');
-          await loadStats();
-          return;
-        }
-        const data = await res.json();
-        displaySecret(data);
-        showStatus('');
-        secretText.value = '';
-        charCount.textContent = '0/280';
-        await loadStats();
-      } catch (e) {
-        showStatus('Error enviando secreto.');
-      }
+        const res = await fetch('/api/secrets/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        if (res.status === 204) { showStatus('Gracias por tu secreto.'); await loadStats(); return; }
+        const data = await res.json(); displaySecret(data); showStatus('');
+        secretText.value = ''; charCount.textContent = '0/280'; await loadStats();
+      } catch { showStatus('Error enviando secreto.'); }
     };
 
-    // Grabación audio
     recBtn.onclick = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-        chunks = [];
-        mediaRecorder.ondataavailable = e => chunks.push(e.data);
-        mediaRecorder.onstop = () => {
-          blob = new Blob(chunks, { type: 'audio/webm' });
-          preview.src = URL.createObjectURL(blob);
-          preview.classList.remove('hidden');
-          sendAudio.disabled = false;
-        };
-        mediaRecorder.start();
-        recBtn.disabled = true;
-        stopBtn.disabled = false;
-        showStatus('Grabando...');
-        setTimeout(() => { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); }, 60000);
-      } catch (e) {
-        showStatus('No se pudo acceder al micrófono.');
-      }
+        chunks = []; mediaRecorder.ondataavailable = e => chunks.push(e.data);
+        mediaRecorder.onstop = () => { blob = new Blob(chunks, { type: 'audio/webm' }); preview.src = URL.createObjectURL(blob); preview.classList.remove('hidden'); sendAudio.disabled = false; };
+        mediaRecorder.start(); recBtn.disabled = true; stopBtn.disabled = false; showStatus('Grabando...');
+        setTimeout(() => { if (mediaRecorder?.state === 'recording') mediaRecorder.stop(); }, 60000);
+      } catch { showStatus('No se pudo acceder al micrófono.'); }
     };
-
-    stopBtn.onclick = () => {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-        recBtn.disabled = false;
-        stopBtn.disabled = true;
-        showStatus('Grabación detenida.');
-      }
-    };
-
+    stopBtn.onclick = () => { if (mediaRecorder?.state === 'recording') { mediaRecorder.stop(); recBtn.disabled = false; stopBtn.disabled = true; showStatus('Grabación detenida.'); } };
     sendAudio.onclick = async () => {
       if (!blob) return;
-      showStatus('Enviando audio...');
-      const fd = new FormData();
-      fd.append('audio', blob, 'secret.webm');
+      showStatus('Enviando audio...'); const fd = new FormData(); fd.append('audio', blob, 'secret.webm');
       try {
         const res = await fetch('/api/secrets/audio', { method: 'POST', body: fd });
-        if (res.status === 204) {
-          showStatus('Gracias por tu secreto. Aún no hay otro disponible. Pulsa "Intentar conseguir uno ahora" más tarde.');
-          preview.classList.add('hidden');
-          sendAudio.disabled = true;
-          await loadStats();
-          return;
-        }
-        const data = await res.json();
-        displaySecret(data);
-        showStatus('');
-        preview.classList.add('hidden');
-        sendAudio.disabled = true;
-        await loadStats();
-      } catch (e) {
-        showStatus('Error enviando audio.');
-      }
+        if (res.status === 204) { showStatus('Gracias por tu secreto.'); preview.classList.add('hidden'); sendAudio.disabled = true; await loadStats(); return; }
+        const data = await res.json(); displaySecret(data); showStatus(''); preview.classList.add('hidden'); sendAudio.disabled = true; await loadStats();
+      } catch { showStatus('Error enviando audio.'); }
     };
 
-    // Intentar obtener uno
     tryFetch.onclick = async () => {
       showStatus('Buscando secreto...');
       try {
         const res = await fetch('/api/secrets/one');
-        if (res.status === 204) {
-          showStatus('De momento no hay uno disponible. Prueba más tarde.');
-          await loadStats();
-          return;
-        }
-        const data = await res.json();
-        displaySecret(data);
-        showStatus('');
-        await loadStats();
-      } catch (e) {
-        showStatus('Error al buscar.');
-      }
+        if (res.status === 204) { showStatus('No hay disponible.'); await loadStats(); return; }
+        const data = await res.json(); displaySecret(data); showStatus(''); await loadStats();
+      } catch { showStatus('Error al buscar.'); }
     };
   </script>
 </body>

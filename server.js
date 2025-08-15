@@ -70,15 +70,20 @@ ensureSchema().catch((e) => {
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
-app.use(express.static('public')); // sirve tu index.html
 
-// Sesión anónima simple
+// ⚠️ IMPORTANTE: sesión anónima ANTES de servir estáticos y ANTES de las rutas
 app.use((req, res, next) => {
   if (!req.cookies.sid) {
-    res.cookie('sid', nanoid(16), { httpOnly: false, sameSite: 'lax' });
+    const sid = nanoid(16);
+    // que esté disponible ya en ESTA petición
+    req.cookies.sid = sid;
+    // y que el navegador la guarde para las siguientes
+    res.cookie('sid', sid, { httpOnly: false, sameSite: 'lax' });
   }
   next();
 });
+
+app.use(express.static('public')); // sirve tu index.html
 
 // Multer en memoria (NADA de disco)
 const upload = multer({
@@ -149,7 +154,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // Texto
 app.post('/api/secrets/text', async (req, res) => {
   try {
-    const sid = req.cookies.sid;
+    const sid = req.cookies.sid; // ya garantizada por el middleware
     let { text } = req.body || {};
     text = (text || '').toString().trim();
 
@@ -180,7 +185,7 @@ app.post('/api/secrets/text', async (req, res) => {
 // Audio (voz real)
 app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   try {
-    const sid = req.cookies.sid;
+    const sid = req.cookies.sid; // ya garantizada
     if (!req.file) return res.status(400).json({ error: 'Falta archivo de audio.' });
 
     const text = (req.body?.text || '').toString().trim() || null;
@@ -236,7 +241,7 @@ app.get('/api/audio/:id', async (req, res) => {
   }
 });
 
-// Stats (contador) — ampliado con exchanged_total y created_total
+// Stats (contador) — con exchanged_total y created_total
 app.get('/api/stats', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
@@ -259,8 +264,8 @@ app.get('/api/stats', async (req, res) => {
     res.json({
       available_for_you: rAvailForYou.rows[0].c,
       available_total: rAvailTotal.rows[0].c,
-      exchanged_total: rExchanged.rows[0].c,  // 👈 NUEVO
-      created_total: rCreated.rows[0].c       // 👈 opcional
+      exchanged_total: rExchanged.rows[0].c,
+      created_total: rCreated.rows[0].c
     });
   } catch (e) {
     console.error(e);

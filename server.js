@@ -1,6 +1,8 @@
 // server.js — Persistencia sin disco (Render Free) con PostgreSQL (Neon/Supabase/Railway)
 // - Guarda textos y AUDIOS (voz real) dentro de Postgres (BYTEA)
-// - Intercambio 1x1 por envío (prioriza otra sesión; fallback cualquiera distinto)
+// - Intercambio 1x1 por envío (nunca misma sesión; nunca el mismo id)
+// - Endpoints: /api/secrets/text, /api/secrets/audio, /api/secrets/one
+//              /api/audio/:id, /api/stats, /api/health
 
 const express = require('express');
 const multer = require('multer');
@@ -23,7 +25,7 @@ if (!DATABASE_URL) {
   process.exit(1);
 }
 
-// Para que req.secure funcione detrás de Render / proxies
+// Detrás de proxy (Render) para cookies seguras
 app.set('trust proxy', 1);
 
 // Log de depuración (solo host, sin credenciales)
@@ -59,6 +61,7 @@ async function ensureSchema() {
   console.log('✅ Esquema verificado/creado en Postgres.');
 }
 
+// Arranque: comprobamos esquema antes de aceptar tráfico
 ensureSchema().catch((e) => {
   console.error('❌ Error ensureSchema:', e);
   process.exit(1);
@@ -71,17 +74,16 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
-// Sesión anónima ANTES de estáticos y rutas
+// Sesión anónima ANTES de estáticos/rutas
 app.use((req, res, next) => {
   let sid = req.cookies.sid;
   if (!sid) {
     sid = nanoid(16);
-    // cookie segura si vamos por https (Render)
     const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-    res.cookie('sid', sid, { httpOnly: false, sameSite: 'lax', secure: isSecure });
-    // disponible en esta misma request
+    // disponible ya en esta request
     req.cookies.sid = sid;
-    console.log(`🧁 Nueva SID asignada: ${sid}`);
+    // persistir en el navegador
+    res.cookie('sid', sid, { httpOnly: false, sameSite: 'lax', secure: isSecure });
   }
   next();
 });
@@ -102,12 +104,25 @@ function violatesPolicy(text = '') {
   return banned.some((re) => re.test(text));
 }
 
-// Selecciona un secreto distinto al recién insertado.
-// 1) Otra sesión FIFO; 2) cualquiera distinto FIFO.
+/**
+ * Devuelve y marca como 'claimed' un secreto:
+ *  - Nunca el mismo id (excludeId)
+ *  - Nunca de la misma sesión (excludeSessionId)
+ *  - FIFO (más antiguo primero)
+ */
 async function getExchangeSecret(excludeSessionId, excludeId) {
-  const q1 = `
+  // Validación defensiva
+  const exId = Number(excludeId);
+  if (!Number.isFinite(exId)) {
+    console.warn('⚠️ excludeId inválido en getExchangeSecret:', excludeId);
+  }
+
+  // ÚNICA estrategia: SIEMPRE exigir otra sesión (evita devolverse a uno mismo)
+  // y SIEMPRE excluir el id recién insertado.
+  const q = `
     WITH pick AS (
-      SELECT id FROM secrets
+      SELECT id
+      FROM secrets
       WHERE claimed = FALSE
         AND id <> $1
         AND session_id <> $2
@@ -120,33 +135,21 @@ async function getExchangeSecret(excludeSessionId, excludeId) {
       WHERE s.id = pick.id
     RETURNING s.*;
   `;
-  const r1 = await pool.query(q1, [excludeId, excludeSessionId]);
-  if (r1.rows.length) {
-    console.log(`🔁 Emparejado (otra sesión). Devuelvo id=${r1.rows[0].id} a sid=${excludeSessionId}`);
-    return r1.rows[0];
+  const r = await pool.query(q, [exId, excludeSessionId]);
+  const row = r.rows[0] || null;
+
+  // Cinturón y tirantes: nunca devolver el mismo id por si acaso
+  if (row && row.id === exId) {
+    console.error('❌ Seguridad: getExchangeSecret obtuvo el mismo id que el insertado. Ignorando.');
+    return null;
+  }
+  // Nunca devolver misma sesión (SQL ya lo evita, pero validamos)
+  if (row && row.session_id === excludeSessionId) {
+    console.error('❌ Seguridad: getExchangeSecret obtuvo misma sesión. Ignorando.');
+    return null;
   }
 
-  const q2 = `
-    WITH pick AS (
-      SELECT id FROM secrets
-      WHERE claimed = FALSE
-        AND id <> $1
-      ORDER BY created_at ASC
-      LIMIT 1
-    )
-    UPDATE secrets s
-      SET claimed = TRUE, claimed_by = $2
-      FROM pick
-      WHERE s.id = pick.id
-    RETURNING s.*;
-  `;
-  const r2 = await pool.query(q2, [excludeId, excludeSessionId]);
-  if (r2.rows.length) {
-    console.log(`🔁 Emparejado (misma sesión permitido). Devuelvo id=${r2.rows[0].id} a sid=${excludeSessionId}`);
-  } else {
-    console.log('⛔ No hay secreto disponible para emparejar ahora mismo.');
-  }
-  return r2.rows[0] || null;
+  return row;
 }
 
 function formatSecret(row, req) {
@@ -182,11 +185,10 @@ app.post('/api/secrets/text', async (req, res) => {
        RETURNING id`,
       [text, sid]
     );
-    const insertedId = ins.rows[0].id;
-    console.log(`✍️ Insertado texto id=${insertedId} sid=${sid}`);
+    const insertedId = Number(ins.rows[0].id);
 
     const other = await getExchangeSecret(sid, insertedId);
-    if (!other) return res.status(204).end();
+    if (!other) return res.status(204).end(); // no hay de otra sesión aún
     res.json(formatSecret(other, req));
   } catch (e) {
     console.error('❌ /api/secrets/text error:', e);
@@ -209,8 +211,7 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
        RETURNING id`,
       [text, buffer, sid]
     );
-    const insertedId = ins.rows[0].id;
-    console.log(`🎙️ Insertado audio id=${insertedId} sid=${sid} bytes=${buffer.length}`);
+    const insertedId = Number(ins.rows[0].id);
 
     const other = await getExchangeSecret(sid, insertedId);
     if (!other) return res.status(204).end();
@@ -221,11 +222,10 @@ app.post('/api/secrets/audio', upload.single('audio'), async (req, res) => {
   }
 });
 
-// Pedir uno cuando quieras
+// Pedir uno cuando quieras (solo otra sesión; nunca el propio más reciente)
 app.get('/api/secrets/one', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
-    console.log(`🔎 /api/secrets/one solicitado por sid=${sid}`);
     const other = await getExchangeSecret(sid, -1);
     if (!other) return res.status(204).end();
     res.json(formatSecret(other, req));
@@ -255,7 +255,7 @@ app.get('/api/audio/:id', async (req, res) => {
   }
 });
 
-// Stats (contador) — con exchanged_total y created_total
+// Stats (contador) — incluye intercambiados y total creados
 app.get('/api/stats', async (req, res) => {
   try {
     const sid = req.cookies.sid || 'anon';
@@ -287,23 +287,7 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-/* ====== DEBUG (temporal) ======
-   Mira qué hay en la tabla para diagnosticar */
-app.get('/api/debug/peek', async (req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT id, type, session_id, claimed, claimed_by, created_at
-      FROM secrets
-      ORDER BY created_at DESC
-      LIMIT 20
-    `);
-    res.json({ rows: r.rows });
-  } catch (e) {
-    console.error('❌ /api/debug/peek error:', e);
-    res.status(500).json({ error: 'debug failed' });
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`✅ Servidor en http://localhost:${PORT}`);
 });
+
